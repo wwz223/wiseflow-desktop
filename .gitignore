@@ -86,3 +86,5 @@ __pycache__/
 # Backup files
 *.backup
 *.bak
+
+resources/*/pb/pb_data/

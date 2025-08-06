@@ -41,6 +41,12 @@ function App() {
     apiKey: '',
     miningInterval: 4,
   });
+
+  // PocketBase 相关状态
+  const [pocketbaseStatus, setPocketbaseStatus] = useState('stopped'); // stopped, starting, running, error
+  const [pocketbaseConfig, setPocketbaseConfig] = useState({
+    port: 8090,
+  });
   const [sources, setSources] = useState([]);
   const [keywords, setKeywords] = useState([]);
   const [newKeyword, setNewKeyword] = useState('');
@@ -53,6 +59,7 @@ function App() {
     url: '',
   });
   const [logs, setLogs] = useState([]);
+  const [pocketbaseLogs, setPocketbaseLogs] = useState([]);
 
   // 初始化时加载配置
   useEffect(() => {
@@ -68,6 +75,10 @@ function App() {
         window.electronAPI.removeAllListeners('python-log');
         window.electronAPI.removeAllListeners('python-error');
         window.electronAPI.removeAllListeners('navigate-to');
+        // 清理 PocketBase 事件监听器
+        window.electronAPI.removeAllListeners('pocketbase-service-started');
+        window.electronAPI.removeAllListeners('pocketbase-service-stopped');
+        window.electronAPI.removeAllListeners('pocketbase-log');
       }
       // 清理轮询
       stopConnectionPolling();
@@ -210,6 +221,10 @@ function App() {
         const config = await window.electronAPI.getConfig();
         if (config) {
           setServiceConfig((prev) => ({ ...prev, ...config }));
+          // 加载 PocketBase 配置
+          if (config.pocketbase) {
+            setPocketbaseConfig((prev) => ({ ...prev, ...config.pocketbase }));
+          }
         }
       } catch (error) {
         console.error('Failed to load config:', error);
@@ -230,6 +245,27 @@ function App() {
         }
       } catch (error) {
         console.error('Failed to save config:', error);
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const savePocketBaseConfig = async (newConfig) => {
+    if (window.electronAPI) {
+      try {
+        // 将 PocketBase 配置嵌套在 pocketbase 键下
+        const configUpdate = { pocketbase: newConfig };
+        const result = await window.electronAPI.saveConfig(configUpdate);
+        if (result.success) {
+          setPocketbaseConfig((prev) => ({ ...prev, ...newConfig }));
+          return true;
+        } else {
+          console.error('Failed to save PocketBase config:', result.error);
+          return false;
+        }
+      } catch (error) {
+        console.error('Failed to save PocketBase config:', error);
         return false;
       }
     }
@@ -264,12 +300,32 @@ function App() {
       window.electronAPI.onNavigateTo((event, tab) => {
         setCurrentTab(tab);
       });
+
+      // PocketBase 事件监听
+      window.electronAPI.onPocketBaseServiceStarted(() => {
+        setPocketbaseStatus('running');
+        addPocketbaseLog('PocketBase 服务已启动');
+      });
+
+      window.electronAPI.onPocketBaseServiceStopped((event, code) => {
+        setPocketbaseStatus('stopped');
+        addPocketbaseLog(`PocketBase 服务已停止 (退出码: ${code})`);
+      });
+
+      window.electronAPI.onPocketBaseLog((event, data) => {
+        addPocketbaseLog(data.trim());
+      });
     }
   };
 
   const addLog = (message) => {
     const timestamp = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev.slice(-99), { timestamp, message }]); // 保留最近100条日志
+  };
+
+  const addPocketbaseLog = (message) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setPocketbaseLogs((prev) => [...prev.slice(-99), { timestamp, message }]); // 保留最近100条日志
   };
 
   const handleStartService = async () => {
@@ -313,6 +369,49 @@ function App() {
       }
     } catch (error) {
       addLog(`停止异常: ${error.message}`);
+    }
+  };
+
+  // PocketBase 服务管理
+  const handleStartPocketBase = async () => {
+    if (!window.electronAPI) {
+      alert('Electron API 不可用，请在 Electron 环境中运行');
+      return;
+    }
+
+    try {
+      setPocketbaseStatus('starting');
+      addPocketbaseLog('正在启动 PocketBase 服务...');
+      
+      const result = await window.electronAPI.startPocketBaseService(pocketbaseConfig);
+      if (result.success) {
+        setPocketbaseStatus('running');
+        addPocketbaseLog('PocketBase 服务启动成功');
+      } else {
+        setPocketbaseStatus('error');
+        addPocketbaseLog(`启动失败: ${result.error}`);
+      }
+    } catch (error) {
+      setPocketbaseStatus('error');
+      addPocketbaseLog(`启动异常: ${error.message}`);
+    }
+  };
+
+  const handleStopPocketBase = async () => {
+    if (!window.electronAPI) {
+      return;
+    }
+
+    try {
+      const result = await window.electronAPI.stopPocketBaseService();
+      if (result.success) {
+        setPocketbaseStatus('stopped');
+        addPocketbaseLog('PocketBase 服务已停止');
+      } else {
+        addPocketbaseLog(`停止失败: ${result.error}`);
+      }
+    } catch (error) {
+      addPocketbaseLog(`停止异常: ${error.message}`);
     }
   };
 
@@ -592,6 +691,78 @@ function App() {
         </div>
       </div>
 
+      {/* PocketBase 服务状态卡片 */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold text-gray-800">PocketBase 服务</h2>
+          <div className={`flex items-center space-x-2 px-3 py-1 rounded-full text-sm font-medium ${
+            pocketbaseStatus === 'running'
+              ? 'bg-green-100 text-green-800'
+              : pocketbaseStatus === 'starting'
+                ? 'bg-yellow-100 text-yellow-800'
+                : pocketbaseStatus === 'error'
+                  ? 'bg-red-100 text-red-800'
+                  : 'bg-gray-100 text-gray-800'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${
+              pocketbaseStatus === 'running'
+                ? 'bg-green-500'
+                : pocketbaseStatus === 'starting'
+                  ? 'bg-yellow-500 animate-pulse'
+                  : pocketbaseStatus === 'error'
+                    ? 'bg-red-500'
+                    : 'bg-gray-500'
+            }`} />
+            {pocketbaseStatus === 'running'
+              ? '运行中'
+              : pocketbaseStatus === 'starting'
+                ? '启动中...'
+                : pocketbaseStatus === 'error'
+                  ? '错误'
+                  : '已停止'}
+          </div>
+        </div>
+        <div className="flex items-center space-x-4">
+          <div className="flex-1">
+            <p className="text-sm text-gray-600 mb-2">
+              端口: <span className="font-medium">{pocketbaseConfig.port}</span>
+            </p>
+            {pocketbaseStatus === 'running' && (
+              <p className="text-sm text-gray-600">
+                访问地址: <a 
+                  href={`http://localhost:${pocketbaseConfig.port}/_/`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:text-blue-800 underline"
+                >
+                  http://localhost:{pocketbaseConfig.port}/_/
+                </a>
+              </p>
+            )}
+          </div>
+          <div className="space-x-2">
+            {pocketbaseStatus === 'running' ? (
+              <button
+                onClick={handleStopPocketBase}
+                className="flex items-center px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+              >
+                <Square className="w-4 h-4 mr-2" />
+                停止 PocketBase
+              </button>
+            ) : (
+              <button
+                onClick={handleStartPocketBase}
+                disabled={pocketbaseStatus === 'starting'}
+                className="flex items-center px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50"
+              >
+                <Play className="w-4 h-4 mr-2" />
+                {pocketbaseStatus === 'starting' ? '启动中...' : '启动 PocketBase'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* 今日统计 */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-white rounded-lg shadow-md p-6">
@@ -669,6 +840,23 @@ function App() {
             <p className="text-gray-500">暂无日志...</p>
           ) : (
             logs.map((log, index) => (
+              <div key={index} className="mb-1">
+                <span className="text-gray-500">[{log.timestamp}]</span>{' '}
+                {log.message}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* PocketBase 日志 */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-semibold text-gray-800 mb-4">PocketBase 日志</h2>
+        <div className="bg-gray-900 text-blue-400 p-4 rounded-lg font-mono text-sm max-h-64 overflow-y-auto">
+          {pocketbaseLogs.length === 0 ? (
+            <p className="text-gray-500">暂无日志...</p>
+          ) : (
+            pocketbaseLogs.map((log, index) => (
               <div key={index} className="mb-1">
                 <span className="text-gray-500">[{log.timestamp}]</span>{' '}
                 {log.message}
@@ -1018,6 +1206,41 @@ function App() {
         >
           <Save className="w-4 h-4 mr-2" />
           保存配置
+        </button>
+      </div>
+
+      {/* PocketBase 服务配置 */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h3 className="text-lg font-medium text-gray-800 mb-4">
+          PocketBase 服务配置
+        </h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              PocketBase 端口
+            </label>
+            <input
+              type="number"
+              value={pocketbaseConfig.port}
+              onChange={(e) =>
+                setPocketbaseConfig((prev) => ({
+                  ...prev,
+                  port: parseInt(e.target.value) || 8090,
+                }))
+              }
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              PocketBase 管理界面将在 http://localhost:{pocketbaseConfig.port}/_/ 可用
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => savePocketBaseConfig(pocketbaseConfig)}
+          className="mt-4 flex items-center px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors"
+        >
+          <Save className="w-4 h-4 mr-2" />
+          保存 PocketBase 配置
         </button>
       </div>
 

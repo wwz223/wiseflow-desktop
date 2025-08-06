@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopPythonService: () => ipcRenderer.invoke('stop-python-service'),
   checkPythonService: () => ipcRenderer.invoke('check-python-service'),
 
+  // PocketBase 服务管理
+  startPocketBaseService: (config) =>
+    ipcRenderer.invoke('start-pocketbase-service', config),
+  stopPocketBaseService: () => ipcRenderer.invoke('stop-pocketbase-service'),
+  checkPocketBaseService: () => ipcRenderer.invoke('check-pocketbase-service'),
+
   // 文件系统操作
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   selectFile: (options) => ipcRenderer.invoke('select-file', options),
@@ -31,6 +37,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPythonError: (callback) => ipcRenderer.on('python-error', callback),
   onNavigateTo: (callback) => ipcRenderer.on('navigate-to', callback),
 
+  // PocketBase 事件监听
+  onPocketBaseServiceStarted: (callback) =>
+    ipcRenderer.on('pocketbase-service-started', callback),
+  onPocketBaseServiceStopped: (callback) =>
+    ipcRenderer.on('pocketbase-service-stopped', callback),
+  onPocketBaseLog: (callback) => ipcRenderer.on('pocketbase-log', callback),
+
   // 移除事件监听
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
 
@@ -40,6 +53,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 // 防止在渲染进程中意外访问 Node.js API
+// eslint-disable-next-line no-undef
 delete window.require;
+// eslint-disable-next-line no-undef
 delete window.exports;
+// eslint-disable-next-line no-undef
 delete window.module;

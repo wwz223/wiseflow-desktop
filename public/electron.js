@@ -71,6 +71,43 @@ function getExecutablePath(platform = process.platform) {
   }
 }
 
+// 获取PocketBase可执行文件路径
+function getPocketBaseExecutablePath(platform = process.platform) {
+  const platformMap = {
+    darwin: 'mac',
+    win32: 'win',
+    linux: 'linux',
+  };
+
+  const platformName = platformMap[platform] || 'linux';
+  const binaryName = platform === 'win32' ? 'pocketbase.exe' : 'pocketbase';
+
+  if (isDev) {
+    // 开发环境：检查是否有本地的PocketBase二进制文件
+    const devBinaryPath = path.join(
+      __dirname,
+      '..',
+      'resources',
+      platformName,
+      'pb',
+      binaryName
+    );
+    if (fs.existsSync(devBinaryPath)) {
+      return devBinaryPath;
+    }
+    return null;
+  } else {
+    // 生产环境：使用打包的PocketBase二进制文件
+    return path.join(
+      process.resourcesPath,
+      'resources',
+      platformName,
+      'pb',
+      binaryName
+    );
+  }
+}
+
 // 注意：已移除 findPythonExecutable 函数，现在仅使用二进制模式
 
 // 初始化配置存储
@@ -78,6 +115,7 @@ const store = new Store();
 
 let mainWindow;
 let pythonProcess = null;
+let pocketbaseProcess = null;
 
 // 注意：安全编码设置将在 app.whenReady() 中进行
 
@@ -359,6 +397,10 @@ app.on('before-quit', () => {
     pythonProcess.kill();
     pythonProcess = null;
   }
+  if (pocketbaseProcess) {
+    pocketbaseProcess.kill();
+    pocketbaseProcess = null;
+  }
 });
 
 // IPC 处理器
@@ -479,6 +521,98 @@ ipcMain.handle('check-python-service', () => {
   return {
     running: pythonProcess !== null && !pythonProcess.killed,
     pid: pythonProcess ? pythonProcess.pid : null,
+  };
+});
+
+// 启动 PocketBase 服务
+ipcMain.handle('start-pocketbase-service', async (event, config) => {
+  try {
+    if (pocketbaseProcess) {
+      return { success: false, error: 'PocketBase 服务已在运行中' };
+    }
+
+    const port = config.port || 8090;
+    const args = ['serve', '--http', `0.0.0.0:${port}`];
+
+    // 获取PocketBase二进制文件路径
+    const binaryPath = getPocketBaseExecutablePath();
+    if (!binaryPath || !fs.existsSync(binaryPath)) {
+      return {
+        success: false,
+        error: `PocketBase 二进制文件不存在: ${binaryPath || '未知路径'}`,
+      };
+    }
+
+    console.log(`使用 PocketBase 二进制文件: ${binaryPath}`);
+
+    // 创建可写的数据目录
+    const userDataPath = app.getPath('userData');
+    const pbDataDir = path.join(userDataPath, 'pocketbase-data');
+    if (!fs.existsSync(pbDataDir)) {
+      fs.mkdirSync(pbDataDir, { recursive: true });
+    }
+
+    // 启动 PocketBase 进程
+    pocketbaseProcess = spawn(binaryPath, args, {
+      stdio: 'pipe',
+      cwd: pbDataDir, // 设置工作目录为可写的数据目录
+    });
+
+    pocketbaseProcess.stdout.on('data', (data) => {
+      console.log(`PocketBase stdout: ${data}`);
+      mainWindow.webContents.send('pocketbase-log', data.toString());
+    });
+
+    pocketbaseProcess.stderr.on('data', (data) => {
+      const logData = data.toString();
+      console.log(`PocketBase stderr: ${logData}`);
+      
+      // PocketBase 的日志通常输出到 stderr，这是正常的
+      mainWindow.webContents.send('pocketbase-log', logData);
+    });
+
+    pocketbaseProcess.on('close', (code) => {
+      console.log(`PocketBase process exited with code ${code}`);
+      pocketbaseProcess = null;
+      mainWindow.webContents.send('pocketbase-service-stopped', code);
+    });
+
+    // 等待一小段时间确保进程启动
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    if (pocketbaseProcess && !pocketbaseProcess.killed) {
+      mainWindow.webContents.send('pocketbase-log', 'PocketBase 服务已启动');
+      mainWindow.webContents.send('pocketbase-service-started');
+      return { success: true };
+    } else {
+      return { success: false, error: '进程启动失败' };
+    }
+  } catch (error) {
+    console.error('启动 PocketBase 失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 停止 PocketBase 服务
+ipcMain.handle('stop-pocketbase-service', () => {
+  try {
+    if (pocketbaseProcess) {
+      pocketbaseProcess.kill();
+      pocketbaseProcess = null;
+      return { success: true };
+    } else {
+      return { success: false, error: 'PocketBase 服务未在运行' };
+    }
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 检查 PocketBase 服务状态
+ipcMain.handle('check-pocketbase-service', () => {
+  return {
+    running: pocketbaseProcess !== null && !pocketbaseProcess.killed,
+    pid: pocketbaseProcess ? pocketbaseProcess.pid : null,
   };
 });
 
