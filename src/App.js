@@ -22,9 +22,12 @@ import {
   Download,
   FolderOpen,
   Save,
+  Video,
+  MessageCircle,
 } from 'lucide-react';
 import axios from 'axios';
 import WiseFlowAPIClient from './api/wiseflowClient';
+import PocketBaseClient from './api/pocketbaseClient';
 import './App.css';
 
 function App() {
@@ -32,6 +35,10 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState('stopped'); // stopped, starting, running, error
   const [apiClient] = useState(() => new WiseFlowAPIClient('http://localhost:8080'));
   const [isBackendConnected, setIsBackendConnected] = useState(false);
+  
+  // PocketBase 客户端
+  const [pbClient] = useState(() => new PocketBaseClient('http://localhost:8090'));
+  const [isPocketBaseConnected, setIsPocketBaseConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionPolling, setConnectionPolling] = useState(false);
   const [pollingAttempts, setPollingAttempts] = useState(0);
@@ -51,6 +58,10 @@ function App() {
   const [keywords, setKeywords] = useState([]);
   const [newKeyword, setNewKeyword] = useState('');
   const [discoveredInfo, setDiscoveredInfo] = useState([]);
+  
+  // 缓存数据状态
+  const [ksCache, setKsCache] = useState([]);
+  const [wbCache, setWbCache] = useState([]);
 
   const [showAddSource, setShowAddSource] = useState(false);
   const [newSource, setNewSource] = useState({
@@ -66,6 +77,7 @@ function App() {
     loadConfig();
     setupEventListeners();
     checkBackendConnection();
+    checkPocketBaseConnection();
 
     return () => {
       // 清理事件监听器
@@ -101,6 +113,26 @@ function App() {
       console.log('后端连接检查失败:', error);
       setIsBackendConnected(false);
       addLog('API连接失败，请检查服务状态或点击重连');
+      return false;
+    }
+  };
+
+  // 检查 PocketBase 连接状态
+  const checkPocketBaseConnection = async () => {
+    try {
+      const connected = await pbClient.checkConnection();
+      setIsPocketBaseConnected(connected);
+      if (connected) {
+        addPocketbaseLog('PocketBase 连接成功');
+        loadPocketBaseData();
+      } else {
+        addPocketbaseLog('PocketBase 连接失败，请稍后重试');
+      }
+      return connected;
+    } catch (error) {
+      console.log('PocketBase 连接检查失败:', error);
+      setIsPocketBaseConnected(false);
+      addPocketbaseLog('PocketBase 连接失败，请检查服务状态');
       return false;
     }
   };
@@ -215,6 +247,75 @@ function App() {
     }
   };
 
+  // 从 PocketBase 加载数据
+  const loadPocketBaseData = async () => {
+    try {
+      let hasPermissionIssues = false;
+
+      // 加载信息源
+      const sourcesResponse = await pbClient.getSources();
+      if (sourcesResponse.success && sourcesResponse.sources) {
+        setSources(sourcesResponse.sources);
+        addPocketbaseLog(`✅ 已加载 ${sourcesResponse.sources.length} 个信息源`);
+      } else if (sourcesResponse.needsAuth) {
+        addPocketbaseLog(`⚠️ 信息源: ${sourcesResponse.error}`);
+        hasPermissionIssues = true;
+      } else {
+        addPocketbaseLog(`❌ 信息源加载失败: ${sourcesResponse.error}`);
+      }
+
+      // 加载关键词
+      const keywordsResponse = await pbClient.getKeywords();
+      if (keywordsResponse.success && keywordsResponse.keywords) {
+        setKeywords(keywordsResponse.keywords.map(k => k.keyword));
+        addPocketbaseLog(`✅ 已加载 ${keywordsResponse.keywords.length} 个关注点`);
+      } else if (keywordsResponse.needsAuth) {
+        addPocketbaseLog(`⚠️ 关注点: ${keywordsResponse.error}`);
+        hasPermissionIssues = true;
+      } else {
+        addPocketbaseLog(`❌ 关注点加载失败: ${keywordsResponse.error}`);
+      }
+
+      // 加载发现的信息
+      const infoResponse = await pbClient.getDiscoveredInfo(10, 0);
+      if (infoResponse.success && infoResponse.info) {
+        setDiscoveredInfo(infoResponse.info);
+        addPocketbaseLog(`✅ 已加载 ${infoResponse.info.length} 条信息`);
+      } else if (infoResponse.needsAuth) {
+        addPocketbaseLog('⚠️ 信息内容: 需要管理员权限');
+        hasPermissionIssues = true;
+      } else {
+        addPocketbaseLog(`❌ 信息加载失败: ${infoResponse.error}`);
+      }
+
+      // 加载快手缓存数据
+      const ksCacheResponse = await pbClient.getKsCache(10, 0);
+      if (ksCacheResponse.success && ksCacheResponse.data) {
+        setKsCache(ksCacheResponse.data);
+        addPocketbaseLog(`✅ 已加载 ${ksCacheResponse.data.length} 条快手数据`);
+      } else {
+        addPocketbaseLog(`❌ 快手数据加载失败: ${ksCacheResponse.error}`);
+      }
+
+      // 加载微博缓存数据
+      const wbCacheResponse = await pbClient.getWbCache(10, 0);
+      if (wbCacheResponse.success && wbCacheResponse.data) {
+        setWbCache(wbCacheResponse.data);
+        addPocketbaseLog(`✅ 已加载 ${wbCacheResponse.data.length} 条微博数据`);
+      } else {
+        addPocketbaseLog(`❌ 微博数据加载失败: ${wbCacheResponse.error}`);
+      }
+
+      // 如果有权限问题，提供解决方案
+      if (hasPermissionIssues) {
+        addPocketbaseLog('🔑 解决方案: 访问 http://localhost:' + pocketbaseConfig.port + '/_/ 登录管理员账户');
+      }
+    } catch (error) {
+      console.error('加载 PocketBase 数据失败:', error);
+      addPocketbaseLog(`数据加载失败: ${error.message}`);
+    }
+  };
+
   const loadConfig = async () => {
     if (window.electronAPI) {
       try {
@@ -223,7 +324,14 @@ function App() {
           setServiceConfig((prev) => ({ ...prev, ...config }));
           // 加载 PocketBase 配置
           if (config.pocketbase) {
-            setPocketbaseConfig((prev) => ({ ...prev, ...config.pocketbase }));
+            setPocketbaseConfig((prev) => {
+              const newConfig = { ...prev, ...config.pocketbase };
+              // 同步更新 PocketBase 客户端端口
+              if (newConfig.port && newConfig.port !== pbClient.getCurrentPort()) {
+                pbClient.updatePort(newConfig.port);
+              }
+              return newConfig;
+            });
           }
         }
       } catch (error) {
@@ -258,7 +366,14 @@ function App() {
         const configUpdate = { pocketbase: newConfig };
         const result = await window.electronAPI.saveConfig(configUpdate);
         if (result.success) {
-          setPocketbaseConfig((prev) => ({ ...prev, ...newConfig }));
+          setPocketbaseConfig((prev) => {
+            const updatedConfig = { ...prev, ...newConfig };
+            // 同步更新 PocketBase 客户端端口
+            if (newConfig.port && newConfig.port !== pbClient.getCurrentPort()) {
+              pbClient.updatePort(newConfig.port);
+            }
+            return updatedConfig;
+          });
           return true;
         } else {
           console.error('Failed to save PocketBase config:', result.error);
@@ -305,10 +420,26 @@ function App() {
       window.electronAPI.onPocketBaseServiceStarted(() => {
         setPocketbaseStatus('running');
         addPocketbaseLog('PocketBase 服务已启动');
+        // 启动后检查连接并加载数据 - 增加延迟和重试
+        setTimeout(async () => {
+          addPocketbaseLog('开始检查 PocketBase 连接...');
+          // 重试机制：最多尝试 5 次，每次间隔 3 秒
+          for (let i = 0; i < 5; i++) {
+            const connected = await checkPocketBaseConnection();
+            if (connected) {
+              break;
+            }
+            if (i < 4) { // 不是最后一次尝试
+              addPocketbaseLog(`连接失败，3秒后重试 (${i + 1}/5)...`);
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+          }
+        }, 3000); // 增加初始延迟到3秒
       });
 
       window.electronAPI.onPocketBaseServiceStopped((event, code) => {
         setPocketbaseStatus('stopped');
+        setIsPocketBaseConnected(false);
         addPocketbaseLog(`PocketBase 服务已停止 (退出码: ${code})`);
       });
 
@@ -421,21 +552,28 @@ function App() {
     }
 
     try {
-      if (isBackendConnected) {
-        // 使用后端API
-        await apiClient.addKeyword(newKeyword.trim());
-        // 重新加载关键词列表
-        const keywordsResponse = await apiClient.getKeywords();
-        if (keywordsResponse.keywords) {
-          setKeywords(keywordsResponse.keywords.map(k => k.keyword));
+      if (isPocketBaseConnected) {
+        // 使用 PocketBase
+        const response = await pbClient.addKeyword(newKeyword.trim());
+        if (response.success) {
+          // 重新加载关键词列表
+          const keywordsResponse = await pbClient.getKeywords();
+          if (keywordsResponse.success && keywordsResponse.keywords) {
+            setKeywords(keywordsResponse.keywords.map(k => k.keyword));
+            addPocketbaseLog(`已添加关键词: ${newKeyword.trim()}`);
+          }
+        } else {
+          throw new Error(response.error);
         }
       } else {
-        // 后端未连接时使用本地状态
+        // PocketBase 未连接时使用本地状态
         setKeywords([...keywords, newKeyword.trim()]);
+        addPocketbaseLog(`本地添加关键词: ${newKeyword.trim()}`);
       }
       setNewKeyword('');
     } catch (error) {
       console.error('添加关键词失败:', error);
+      addPocketbaseLog(`添加关键词失败: ${error.message}`);
       // 失败时回退到本地状态
       setKeywords([...keywords, newKeyword.trim()]);
       setNewKeyword('');
@@ -444,24 +582,31 @@ function App() {
 
   const removeKeyword = async (keyword) => {
     try {
-      if (isBackendConnected) {
-        // 使用后端API - 需要先找到关键词ID
-        const keywordsResponse = await apiClient.getKeywords();
+      if (isPocketBaseConnected) {
+        // 使用 PocketBase - 需要先找到关键词ID
+        const keywordsResponse = await pbClient.getKeywords();
         const keywordObj = keywordsResponse.keywords?.find(k => k.keyword === keyword);
         if (keywordObj) {
-          await apiClient.deleteKeyword(keywordObj.id);
-          // 重新加载关键词列表
-          const updatedResponse = await apiClient.getKeywords();
-          if (updatedResponse.keywords) {
-            setKeywords(updatedResponse.keywords.map(k => k.keyword));
+          const deleteResponse = await pbClient.deleteKeyword(keywordObj.id);
+          if (deleteResponse.success) {
+            // 重新加载关键词列表
+            const updatedResponse = await pbClient.getKeywords();
+            if (updatedResponse.success && updatedResponse.keywords) {
+              setKeywords(updatedResponse.keywords.map(k => k.keyword));
+              addPocketbaseLog(`已删除关键词: ${keyword}`);
+            }
+          } else {
+            throw new Error(deleteResponse.error);
           }
         }
       } else {
-        // 后端未连接时使用本地状态
+        // PocketBase 未连接时使用本地状态
         setKeywords(keywords.filter((k) => k !== keyword));
+        addPocketbaseLog(`本地删除关键词: ${keyword}`);
       }
     } catch (error) {
       console.error('删除关键词失败:', error);
+      addPocketbaseLog(`删除关键词失败: ${error.message}`);
       // 失败时回退到本地状态
       setKeywords(keywords.filter((k) => k !== keyword));
     }
@@ -473,16 +618,21 @@ function App() {
     }
 
     try {
-      if (isBackendConnected) {
-        // 使用后端API
-        await apiClient.addSource(newSource);
-        // 重新加载信息源列表
-        const sourcesResponse = await apiClient.getSources();
-        if (sourcesResponse.sources) {
-          setSources(sourcesResponse.sources);
+      if (isPocketBaseConnected) {
+        // 使用 PocketBase
+        const response = await pbClient.addSource(newSource);
+        if (response.success) {
+          // 重新加载信息源列表
+          const sourcesResponse = await pbClient.getSources();
+          if (sourcesResponse.success && sourcesResponse.sources) {
+            setSources(sourcesResponse.sources);
+            addPocketbaseLog(`已添加信息源: ${newSource.name}`);
+          }
+        } else {
+          throw new Error(response.error);
         }
       } else {
-        // 后端未连接时使用本地状态
+        // PocketBase 未连接时使用本地状态
         setSources([
           ...sources,
           {
@@ -492,11 +642,13 @@ function App() {
             lastSync: '从未',
           },
         ]);
+        addPocketbaseLog(`本地添加信息源: ${newSource.name}`);
       }
       setNewSource({ name: '', type: 'rss', url: '' });
       setShowAddSource(false);
     } catch (error) {
       console.error('添加信息源失败:', error);
+      addPocketbaseLog(`添加信息源失败: ${error.message}`);
       // 失败时回退到本地状态
       setSources([
         ...sources,
@@ -542,20 +694,27 @@ function App() {
 
   const deleteSource = async (id) => {
     try {
-      if (isBackendConnected) {
-        // 使用后端API
-        await apiClient.deleteSource(id);
-        // 重新加载信息源列表
-        const sourcesResponse = await apiClient.getSources();
-        if (sourcesResponse.sources) {
-          setSources(sourcesResponse.sources);
+      if (isPocketBaseConnected) {
+        // 使用 PocketBase
+        const response = await pbClient.deleteSource(id);
+        if (response.success) {
+          // 重新加载信息源列表
+          const sourcesResponse = await pbClient.getSources();
+          if (sourcesResponse.success && sourcesResponse.sources) {
+            setSources(sourcesResponse.sources);
+            addPocketbaseLog(`已删除信息源 ID: ${id}`);
+          }
+        } else {
+          throw new Error(response.error);
         }
       } else {
-        // 后端未连接时使用本地状态
+        // PocketBase 未连接时使用本地状态
         setSources(sources.filter((s) => s.id !== id));
+        addPocketbaseLog(`本地删除信息源 ID: ${id}`);
       }
     } catch (error) {
       console.error('删除信息源失败:', error);
+      addPocketbaseLog(`删除信息源失败: ${error.message}`);
       // 失败时回退到本地状态
       setSources(sources.filter((s) => s.id !== id));
     }
@@ -727,17 +886,28 @@ function App() {
             <p className="text-sm text-gray-600 mb-2">
               端口: <span className="font-medium">{pocketbaseConfig.port}</span>
             </p>
+            <p className="text-sm text-gray-600 mb-2">
+              数据库连接:{' '}
+              <span className={`font-medium ${isPocketBaseConnected ? 'text-green-600' : 'text-red-600'}`}>
+                {isPocketBaseConnected ? '已连接' : '未连接'}
+              </span>
+            </p>
             {pocketbaseStatus === 'running' && (
-              <p className="text-sm text-gray-600">
-                访问地址: <a 
-                  href={`http://localhost:${pocketbaseConfig.port}/_/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-600 hover:text-blue-800 underline"
-                >
-                  http://localhost:{pocketbaseConfig.port}/_/
-                </a>
-              </p>
+              <>
+                <p className="text-sm text-gray-600">
+                  管理界面: <a 
+                    href={`http://localhost:${pocketbaseConfig.port}/_/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:text-blue-800 underline"
+                  >
+                    http://localhost:{pocketbaseConfig.port}/_/
+                  </a>
+                </p>
+                <p className="text-xs text-amber-600 mt-1">
+                  💡 提示: 如需完整数据访问权限，请在管理界面登录管理员账户
+                </p>
+              </>
             )}
           </div>
           <div className="space-x-2">
@@ -759,12 +929,21 @@ function App() {
                 {pocketbaseStatus === 'starting' ? '启动中...' : '启动 PocketBase'}
               </button>
             )}
+            {pocketbaseStatus === 'running' && !isPocketBaseConnected && (
+              <button
+                onClick={checkPocketBaseConnection}
+                className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                重连数据库
+              </button>
+            )}
           </div>
         </div>
       </div>
 
       {/* 今日统计 */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
         <div className="bg-white rounded-lg shadow-md p-6">
           <div className="flex items-center">
             <div className="bg-blue-100 rounded-lg p-3">
@@ -796,6 +975,32 @@ function App() {
               <p className="text-sm text-gray-600">活跃信源</p>
               <p className="text-2xl font-bold text-gray-800">
                 {sources.filter((s) => s.enabled).length}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="flex items-center">
+            <div className="bg-red-100 rounded-lg p-3">
+              <Video className="w-6 h-6 text-red-600" />
+            </div>
+            <div className="ml-4">
+              <p className="text-sm text-gray-600">快手数据</p>
+              <p className="text-2xl font-bold text-gray-800">
+                {ksCache.length}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="flex items-center">
+            <div className="bg-orange-100 rounded-lg p-3">
+              <MessageCircle className="w-6 h-6 text-orange-600" />
+            </div>
+            <div className="ml-4">
+              <p className="text-sm text-gray-600">微博数据</p>
+              <p className="text-2xl font-bold text-gray-800">
+                {wbCache.length}
               </p>
             </div>
           </div>
@@ -1137,6 +1342,183 @@ function App() {
     </div>
   );
 
+  // 快手缓存数据渲染
+  const renderKsCache = () => (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-gray-800">快手数据</h2>
+        <div className="flex items-center space-x-3">
+          <div className="text-sm text-gray-600">
+            共 {ksCache.length} 条数据
+          </div>
+          <button 
+            onClick={loadPocketBaseData}
+            className="flex items-center px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {ksCache.map((item) => (
+          <div key={item.id} className="bg-white rounded-lg shadow-md p-4">
+            <div className="mb-3">
+              <h3 className="text-sm font-medium text-gray-800 line-clamp-2">
+                {item.title || '无标题'}
+              </h3>
+              {item.desc && (
+                <p className="text-xs text-gray-600 mt-1 line-clamp-3">
+                  {item.desc}
+                </p>
+              )}
+            </div>
+            
+            <div className="space-y-2 text-xs text-gray-500">
+              <div className="flex justify-between">
+                <span>作者: {item.nickname || '未知'}</span>
+                <span>类型: {item.video_type || '视频'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>👍 {item.liked_count || 0}</span>
+                <span>👀 {item.viewd_count || 0}</span>
+              </div>
+              {item.source_keyword && (
+                <div className="text-blue-600 text-xs">
+                  关键词: {item.source_keyword}
+                </div>
+              )}
+              {item.create_time && (
+                <div className="text-xs text-gray-400">
+                  {item.create_time}
+                </div>
+              )}
+            </div>
+            
+            {item.video_url && (
+              <div className="mt-3">
+                <a 
+                  href={item.video_url} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center text-xs text-blue-600 hover:text-blue-800"
+                >
+                  <Video className="w-3 h-3 mr-1" />
+                  查看视频
+                </a>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      
+      {ksCache.length === 0 && (
+        <div className="text-center py-12">
+          <Video className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <p className="text-gray-500">暂无快手数据</p>
+        </div>
+      )}
+    </div>
+  );
+
+  // 微博缓存数据渲染
+  const renderWbCache = () => (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-gray-800">微博数据</h2>
+        <div className="flex items-center space-x-3">
+          <div className="text-sm text-gray-600">
+            共 {wbCache.length} 条数据
+          </div>
+          <button 
+            onClick={loadPocketBaseData}
+            className="flex items-center px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {wbCache.map((item) => (
+          <div key={item.id} className="bg-white rounded-lg shadow-md p-6">
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-gradient-to-r from-pink-500 to-orange-500 rounded-full flex items-center justify-center text-white font-bold">
+                  {item.nickname ? item.nickname.charAt(0) : 'U'}
+                </div>
+                <div>
+                  <div className="font-medium text-gray-800">
+                    {item.nickname || '未知用户'}
+                  </div>
+                  <div className="text-xs text-gray-500 flex items-center space-x-2">
+                    {item.gender && <span>{item.gender}</span>}
+                    {item.ip_location && <span>📍 {item.ip_location}</span>}
+                    {item.create_time && <span>🕒 {item.create_time}</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            {item.content && (
+              <div className="mb-4">
+                <p className="text-gray-800 leading-relaxed">
+                  {item.content}
+                </p>
+              </div>
+            )}
+            
+            <div className="flex items-center justify-between text-sm text-gray-500">
+              <div className="flex items-center space-x-4">
+                <span className="flex items-center">
+                  <span className="mr-1">👍</span>
+                  {item.liked_count || 0}
+                </span>
+                <span className="flex items-center">
+                  <span className="mr-1">💬</span>
+                  {item.comments_count || 0}
+                </span>
+                <span className="flex items-center">
+                  <span className="mr-1">🔄</span>
+                  {item.shared_count || 0}
+                </span>
+              </div>
+              
+              {item.source_keyword && (
+                <span className="text-blue-600 text-xs bg-blue-50 px-2 py-1 rounded">
+                  {item.source_keyword}
+                </span>
+              )}
+            </div>
+            
+            {item.note_url && (
+              <div className="mt-3 pt-3 border-t border-gray-100">
+                <a 
+                  href={item.note_url} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center text-sm text-blue-600 hover:text-blue-800"
+                >
+                  <MessageCircle className="w-4 h-4 mr-1" />
+                  查看原微博
+                </a>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      
+      {wbCache.length === 0 && (
+        <div className="text-center py-12">
+          <MessageCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <p className="text-gray-500">暂无微博数据</p>
+        </div>
+      )}
+    </div>
+  );
+
   const renderSettings = () => (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-800">设置</h2>
@@ -1270,6 +1652,8 @@ function App() {
                   { key: 'sources', label: '信息源', icon: Globe },
                   { key: 'keywords', label: '关键点', icon: Tag },
                   { key: 'info', label: '信息流', icon: Rss },
+                  { key: 'ks-cache', label: '快手数据', icon: Video },
+                  { key: 'wb-cache', label: '微博数据', icon: MessageCircle },
                   { key: 'settings', label: '设置', icon: Settings },
                 ].map(({ key, label, icon: Icon }) => (
                   <button
@@ -1297,6 +1681,8 @@ function App() {
         {currentTab === 'sources' && renderSources()}
         {currentTab === 'keywords' && renderKeywords()}
         {currentTab === 'info' && renderInfo()}
+        {currentTab === 'ks-cache' && renderKsCache()}
+        {currentTab === 'wb-cache' && renderWbCache()}
         {currentTab === 'settings' && renderSettings()}
       </main>
     </div>
