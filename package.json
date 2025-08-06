@@ -22,11 +22,16 @@
     "setup-python": "cd python-backend && python3 start_service.py --install",
     "pack-all": "npm run build && npm run pack",
     "dist-all": "npm run build && npm run dist",
-    "clean": "rm -rf dist build || del /q dist build 2>nul || echo 'Clean completed'"
+    "clean": "rm -rf dist build || del /q dist build 2>nul || echo 'Clean completed'",
+    "build-python-binary": "cd python-backend && python3 build_binary.py",
+    "rebuild-service": "npm run build-python-binary && npm run build",
+    "debug-package": "node debug-package.js",
+    "fix-package": "node fix-package.js",
+    "full-rebuild": "npm run clean && npm run build && npm run pack"
   },
   "build": {
     "appId": "com.wiseflow.desktop",
-    "productName": "WiseFlow Desktop",
+    "productName": "WiseFlow",
     "directories": {
       "output": "dist"
     },
@@ -40,6 +45,7 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "assets/logo.png",
       "target": [
         {
           "target": "dmg",
@@ -51,6 +57,7 @@
       ]
     },
     "win": {
+      "icon": "assets/logo.png",
       "target": [
         {
           "target": "nsis",
@@ -61,6 +68,7 @@
       ]
     },
     "linux": {
+      "icon": "assets/logo.png",
       "target": [
         {
           "target": "AppImage",
@@ -73,7 +81,16 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   },
   "keywords": [
     "electron",

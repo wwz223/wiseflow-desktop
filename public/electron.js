@@ -10,34 +10,68 @@ const path = require('path');
 const { spawn } = require('child_process');
 const Store = require('electron-store');
 const fs = require('fs');
-const isDev = process.env.NODE_ENV !== 'production';
+// 修复：正确检测生产环境 - 检查是否在asar包中
+const isDev = __dirname.indexOf('app.asar') === -1;
+// 生产环境下减少控制台输出
+if (isDev) {
+  console.log('=== WiseFlow Desktop Starting (Development) ===');
+  console.log('isDev:', isDev);
+  console.log('NODE_ENV:', process.env.NODE_ENV);
+  console.log('__dirname:', __dirname);
+}
 
 // 获取资源路径
 function getResourcePath(relativePath) {
+  let resourcePath;
   if (isDev) {
-    return path.join(__dirname, '..', relativePath);
+    resourcePath = path.join(__dirname, '..', relativePath);
   } else {
-    return path.join(process.resourcesPath, 'app', relativePath);
+    // 生产环境：使用app.asar中的路径
+    resourcePath = path.join(__dirname, '..', relativePath);
+  }
+  if (isDev) {
+    console.log(`getResourcePath(${relativePath}) -> ${resourcePath}`);
+  }
+  return resourcePath;
+}
+
+// 获取打包后的二进制文件路径
+function getExecutablePath(platform = process.platform) {
+  const platformMap = {
+    darwin: 'mac',
+    win32: 'win',
+    linux: 'linux',
+  };
+
+  const platformName = platformMap[platform] || 'linux';
+  const binaryName =
+    platform === 'win32' ? 'wiseflow_service.exe' : 'wiseflow_service';
+
+  if (isDev) {
+    // 开发环境：检查是否有本地构建的二进制文件
+    const devBinaryPath = path.join(
+      __dirname,
+      '..',
+      'resources',
+      platformName,
+      binaryName
+    );
+    if (fs.existsSync(devBinaryPath)) {
+      return devBinaryPath;
+    }
+    return null;
+  } else {
+    // 生产环境：使用打包的二进制文件
+    return path.join(
+      process.resourcesPath,
+      'resources',
+      platformName,
+      binaryName
+    );
   }
 }
 
-// 查找Python可执行文件
-function findPythonExecutable() {
-  const possiblePaths = ['python3', 'python', '/usr/bin/python3', '/usr/local/bin/python3'];
-  
-  for (const pythonPath of possiblePaths) {
-    try {
-      const result = spawn(pythonPath, ['--version'], { stdio: 'pipe' });
-      if (result) {
-        return pythonPath;
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-  
-  return 'python3'; // 默认回退
-}
+// 注意：已移除 findPythonExecutable 函数，现在仅使用二进制模式
 
 // 初始化配置存储
 const store = new Store();
@@ -48,6 +82,26 @@ let pythonProcess = null;
 // 注意：安全编码设置将在 app.whenReady() 中进行
 
 function createWindow() {
+  // 仅在开发模式下显示调试信息
+  if (isDev) {
+    console.log('=== Development Debug Info ===');
+    console.log('process.resourcesPath:', process.resourcesPath);
+    console.log('__dirname:', __dirname);
+    console.log('app.getAppPath():', app.getAppPath());
+
+    // 检查关键文件是否存在
+    const checkPaths = [
+      path.join(__dirname, '../build/index.html'),
+      path.join(__dirname, '../build/static'),
+      path.join(__dirname, 'preload.js'),
+    ];
+
+    checkPaths.forEach((checkPath) => {
+      console.log(`Path exists ${checkPath}: ${fs.existsSync(checkPath)}`);
+    });
+    console.log('=============================');
+  }
+
   // 创建浏览器窗口
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -59,7 +113,7 @@ function createWindow() {
       contextIsolation: true,
       enableRemoteModule: false,
       preload: path.join(__dirname, 'preload.js'),
-      webSecurity: true, // 开发环境禁用 web 安全，生产环境启用
+      webSecurity: isDev ? false : true, // 开发环境禁用 web 安全，生产环境启用但放宽限制
       allowRunningInsecureContent: false, // 禁止不安全内容
       experimentalFeatures: false, // 禁用实验性功能
     },
@@ -69,18 +123,64 @@ function createWindow() {
   });
 
   // 加载应用
-  const startUrl = isDev
-    ? 'http://localhost:3000'
-    : `file://${path.join(__dirname, '../build/index.html')}`;
+  let startUrl;
+  if (isDev) {
+    startUrl = 'http://localhost:3000';
+  } else {
+    // 生产环境：正确处理asar路径
+    startUrl = `file://${path.join(__dirname, '../build/index.html')}`;
+  }
+
+  if (isDev) {
+    console.log('Loading URL:', startUrl);
+    console.log('isDev:', isDev);
+    console.log('__dirname:', __dirname);
+    console.log('Current working directory:', process.cwd());
+  }
 
   mainWindow.loadURL(startUrl);
 
-  // 窗口准备好后显示
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+  // 监听加载失败事件
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (event, errorCode, errorDescription, validatedURL) => {
+      console.error(
+        'Failed to load:',
+        errorCode,
+        errorDescription,
+        validatedURL
+      );
+      console.error('isDev:', isDev);
+      console.error('startUrl:', startUrl);
+      console.error('__dirname:', __dirname);
+    }
+  );
+
+  // 监听DOM准备就绪
+  mainWindow.webContents.on('dom-ready', () => {
+    console.log('DOM ready');
+    console.log('Page URL:', mainWindow.webContents.getURL());
   });
 
-  // 打开开发者工具（仅在开发模式下）
+  // 监听页面加载完成
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('Page finished loading');
+    console.log('Final URL:', mainWindow.webContents.getURL());
+  });
+
+  // 窗口准备好后显示
+  mainWindow.once('ready-to-show', () => {
+    console.log('Window ready to show');
+    mainWindow.show();
+
+    // 暂时强制显示开发者工具来调试
+    // mainWindow.webContents.openDevTools();
+
+    // 生产环境下默认不打开开发者工具
+    // 如需调试，可以通过菜单手动打开
+  });
+
+  // 打开开发者工具（开发模式下）
   if (isDev) {
     mainWindow.webContents.openDevTools();
   }
@@ -99,6 +199,32 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // 添加控制台消息捕获
+  mainWindow.webContents.on(
+    'console-message',
+    (event, level, message, line, sourceId) => {
+      console.log(
+        `[Renderer ${level}]`,
+        message,
+        sourceId ? `(${sourceId}:${line})` : ''
+      );
+    }
+  );
+
+  // 监听渲染进程崩溃
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('Render process gone:', details);
+  });
+
+  // 监听响应式崩溃
+  mainWindow.webContents.on('unresponsive', () => {
+    console.warn('Window became unresponsive');
+  });
+
+  mainWindow.webContents.on('responsive', () => {
+    console.log('Window became responsive again');
   });
 }
 
@@ -193,15 +319,27 @@ function createMenu() {
 
 // 应用就绪时的处理
 app.whenReady().then(() => {
+  if (isDev) {
+    console.log('App is ready, starting initialization...');
+  }
+
   // 启用安全编码支持（修复 macOS 警告）
   if (process.platform === 'darwin') {
     app.applicationSupportsSecureRestorableState = true;
   }
 
-  createWindow();
-  createMenu();
+  try {
+    createWindow();
+    createMenu();
+    if (isDev) {
+      console.log('Window and menu created successfully');
+    }
+  } catch (error) {
+    console.error('Error during app initialization:', error);
+  }
 
   app.on('activate', () => {
+    console.log('App activated');
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
@@ -242,51 +380,57 @@ ipcMain.handle('save-config', (event, config) => {
   }
 });
 
-// 启动 Python 服务
+// 启动 Python 服务 (仅支持二进制模式)
 ipcMain.handle('start-python-service', async (event, config) => {
   try {
     if (pythonProcess) {
       return { success: false, error: '服务已在运行中' };
     }
 
-    // 使用配置的Python路径，如果没有则自动查找
-    const pythonPath = config.pythonPath || findPythonExecutable();
-    
-    // 获取Python脚本的正确路径
-    let scriptPath;
-    if (config.scriptPath && config.scriptPath !== '') {
-      // 如果用户指定了路径，使用用户路径
-      scriptPath = config.scriptPath;
-    } else {
-      // 否则使用打包后的默认路径
-      scriptPath = getResourcePath('python-backend/wiseflow_service.py');
-    }
-    
     const port = config.port || 8080;
+    const args = ['--port', port.toString()];
 
-    // 检查脚本文件是否存在
-    if (!fs.existsSync(scriptPath)) {
-      return { 
-        success: false, 
-        error: `Python 脚本文件不存在: ${scriptPath}` 
+    // 仅使用打包的二进制文件
+    const binaryPath = getExecutablePath();
+    if (!binaryPath || !fs.existsSync(binaryPath)) {
+      return {
+        success: false,
+        error: `二进制文件不存在: ${
+          binaryPath || '未知路径'
+        }。请先运行 "npm run build-python-binary" 构建二进制文件。`,
       };
     }
 
-    pythonProcess = spawn(pythonPath, [scriptPath, '--port', port.toString()], {
+    console.log(`使用打包的二进制文件: ${binaryPath}`);
+
+    // 创建可写的数据目录
+    const userDataPath = app.getPath('userData');
+    const dataDir = path.join(userDataPath, 'wiseflow-data');
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+
+    // 启动二进制进程
+    pythonProcess = spawn(binaryPath, args, {
       stdio: 'pipe',
+      cwd: dataDir, // 设置工作目录为可写的数据目录
     });
 
     pythonProcess.stdout.on('data', (data) => {
-      console.log(`Python stdout: ${data}`);
+      console.log(`Service stdout: ${data}`);
       mainWindow.webContents.send('python-log', data.toString());
     });
 
     pythonProcess.stderr.on('data', (data) => {
       const logData = data.toString();
-      console.log(`Python stderr: ${logData}`);
-      
+      console.log(`Service stderr: ${logData}`);
+
       // 区分真正的错误和正常日志
-      if (logData.includes('ERROR') || logData.includes('Traceback') || logData.includes('Exception')) {
+      if (
+        logData.includes('ERROR') ||
+        logData.includes('Traceback') ||
+        logData.includes('Exception')
+      ) {
         mainWindow.webContents.send('python-error', logData);
       } else {
         // aiohttp的访问日志等正常输出作为普通日志处理
@@ -295,7 +439,7 @@ ipcMain.handle('start-python-service', async (event, config) => {
     });
 
     pythonProcess.on('close', (code) => {
-      console.log(`Python process exited with code ${code}`);
+      console.log(`Service process exited with code ${code}`);
       pythonProcess = null;
       mainWindow.webContents.send('python-service-stopped', code);
     });
@@ -304,6 +448,7 @@ ipcMain.handle('start-python-service', async (event, config) => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     if (pythonProcess && !pythonProcess.killed) {
+      mainWindow.webContents.send('python-log', '服务已启动 (二进制模式)');
       mainWindow.webContents.send('python-service-started');
       return { success: true };
     } else {

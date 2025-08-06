@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Play,
   Square,
@@ -32,11 +32,13 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState('stopped'); // stopped, starting, running, error
   const [apiClient] = useState(() => new WiseFlowAPIClient('http://localhost:8080'));
   const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [connectionPolling, setConnectionPolling] = useState(false);
+  const [pollingAttempts, setPollingAttempts] = useState(0);
+  const pollingIntervalRef = useRef(null);
   const [serviceConfig, setServiceConfig] = useState({
     port: 8080,
     apiKey: '',
-    pythonPath: '', // 空字符串让Electron自动查找Python
-    scriptPath: '', // 空字符串让Electron使用默认打包路径
     miningInterval: 4,
   });
   const [sources, setSources] = useState([]);
@@ -67,6 +69,8 @@ function App() {
         window.electronAPI.removeAllListeners('python-error');
         window.electronAPI.removeAllListeners('navigate-to');
       }
+      // 清理轮询
+      stopConnectionPolling();
     };
   }, []);
 
@@ -76,12 +80,103 @@ function App() {
       const connected = await apiClient.checkConnection();
       setIsBackendConnected(connected);
       if (connected) {
+        addLog('API连接成功');
         loadBackendData();
+      } else {
+        addLog('API连接失败，请稍后重试');
       }
+      return connected;
     } catch (error) {
       console.log('后端连接检查失败:', error);
       setIsBackendConnected(false);
+      addLog('API连接失败，请检查服务状态或点击重连');
+      return false;
     }
+  };
+
+  // 手动重连API（启动轮询）
+  const handleReconnectAPI = async () => {
+    addLog('手动重连API...');
+    startConnectionPolling();
+  };
+
+  // 开始轮询API连接
+  const startConnectionPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+    
+    setConnectionPolling(true);
+    setPollingAttempts(0);
+    addLog('开始轮询API连接...');
+    
+    // 立即尝试第一次连接
+    const tryConnection = async () => {
+      setPollingAttempts(prev => {
+        const newAttempts = prev + 1;
+        addLog(`尝试连接API (第${newAttempts}次)...`);
+        return newAttempts;
+      });
+      
+      try {
+        const connected = await apiClient.checkConnection();
+        if (connected) {
+          setIsBackendConnected(true);
+          addLog('✅ API连接成功！');
+          loadBackendData();
+          stopConnectionPolling();
+          return true;
+        }
+      } catch (error) {
+        // 连接失败，继续轮询
+        console.log('API连接尝试失败:', error);
+      }
+      return false;
+    };
+    
+    // 立即执行第一次尝试
+    tryConnection().then(success => {
+      if (!success) {
+        // 如果第一次失败，开始定时轮询
+        pollingIntervalRef.current = setInterval(async () => {
+          setPollingAttempts(prev => {
+            const newAttempts = prev + 1;
+            addLog(`尝试连接API (第${newAttempts}次)...`);
+            return newAttempts;
+          });
+          
+          try {
+            const connected = await apiClient.checkConnection();
+            if (connected) {
+              setIsBackendConnected(true);
+              addLog('✅ API连接成功！');
+              loadBackendData();
+              stopConnectionPolling();
+            }
+          } catch (error) {
+            console.log('API连接尝试失败:', error);
+          }
+        }, 3000); // 每3秒尝试一次
+        
+        // 最多尝试20次 (1分钟)
+        setTimeout(() => {
+          if (pollingIntervalRef.current && !isBackendConnected) {
+            stopConnectionPolling();
+            addLog('⚠️ API连接超时，请检查服务状态或手动重连');
+          }
+        }, 60000);
+      }
+    });
+  };
+
+  // 停止轮询API连接
+  const stopConnectionPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    setConnectionPolling(false);
+    setPollingAttempts(0);
   };
 
   // 从后端加载数据
@@ -146,15 +241,14 @@ function App() {
       window.electronAPI.onPythonServiceStarted(() => {
         setServiceStatus('running');
         addLog('Python 服务已启动');
-        // 服务启动后等待一秒再检查连接
-        setTimeout(() => {
-          checkBackendConnection();
-        }, 1000);
+        // 服务启动后开始轮询API连接
+        startConnectionPolling();
       });
 
       window.electronAPI.onPythonServiceStopped((event, code) => {
         setServiceStatus('stopped');
         setIsBackendConnected(false);
+        stopConnectionPolling(); // 停止轮询
         addLog(`Python 服务已停止 (退出码: ${code})`);
       });
 
@@ -368,33 +462,7 @@ function App() {
     }
   };
 
-  const selectPythonPath = async () => {
-    if (window.electronAPI) {
-      const result = await window.electronAPI.selectFile({
-        filters: [
-          { name: 'Executable Files', extensions: ['exe', 'py'] },
-          { name: 'All Files', extensions: ['*'] },
-        ],
-      });
-      if (result.success) {
-        setServiceConfig((prev) => ({ ...prev, pythonPath: result.path }));
-      }
-    }
-  };
 
-  const selectScriptPath = async () => {
-    if (window.electronAPI) {
-      const result = await window.electronAPI.selectFile({
-        filters: [
-          { name: 'Python Files', extensions: ['py'] },
-          { name: 'All Files', extensions: ['*'] },
-        ],
-      });
-      if (result.success) {
-        setServiceConfig((prev) => ({ ...prev, scriptPath: result.path }));
-      }
-    }
-  };
 
   const exportData = async () => {
     if (window.electronAPI) {
@@ -507,11 +575,17 @@ function App() {
             )}
             {serviceStatus === 'running' && !isBackendConnected && (
               <button
-                onClick={checkBackendConnection}
-                className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                onClick={connectionPolling ? stopConnectionPolling : handleReconnectAPI}
+                disabled={isReconnecting}
+                className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50"
               >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                重连API
+                <RefreshCw className={`w-4 h-4 mr-2 ${isReconnecting || connectionPolling ? 'animate-spin' : ''}`} />
+                {connectionPolling 
+                  ? `尝试连接中... (${pollingAttempts}/20)` 
+                  : isReconnecting 
+                    ? '连接中...' 
+                    : '重连API'
+                }
               </button>
             )}
           </div>
@@ -884,56 +958,7 @@ function App() {
           Python 服务配置
         </h3>
         <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Python 可执行文件路径
-            </label>
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={serviceConfig.pythonPath}
-                onChange={(e) =>
-                  setServiceConfig((prev) => ({
-                    ...prev,
-                    pythonPath: e.target.value,
-                  }))
-                }
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                placeholder="自动检测 (python3/python) 或手动指定路径"
-              />
-              <button
-                onClick={selectPythonPath}
-                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                <FolderOpen className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              WiseFlow 脚本路径
-            </label>
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={serviceConfig.scriptPath}
-                onChange={(e) =>
-                  setServiceConfig((prev) => ({
-                    ...prev,
-                    scriptPath: e.target.value,
-                  }))
-                }
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                placeholder="自动使用打包的脚本 或 手动指定路径"
-              />
-              <button
-                onClick={selectScriptPath}
-                className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                <FolderOpen className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               服务端口
